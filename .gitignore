@@ -1,0 +1,14 @@
+RLinf/
+logs/*
+!logs/.gitkeep
+outputs/
+*.out
+__pycache__/
+*.pyc
+examples/embodiment/config/*_eval.yaml
+slides/*.aux
+slides/*.log
+slides/*.nav
+slides/*.out
+slides/*.snm
+slides/*.toc

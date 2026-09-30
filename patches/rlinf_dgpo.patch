@@ -1,0 +1,2344 @@
+diff --git a/examples/embodiment/config/calvin_abc_d_dgpo_openpi_pi05.yaml b/examples/embodiment/config/calvin_abc_d_dgpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..bab1fb11
+--- /dev/null
++++ b/examples/embodiment/config/calvin_abc_d_dgpo_openpi_pi05.yaml
+@@ -0,0 +1,165 @@
++defaults:
++  - env/calvin_abc@env.train
++  - env/calvin_d@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "calvin_abc_d_dgpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++
++  only_eval: False
++  val_check_interval: -1
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: token_level
++
++  update_epoch: 2          # best DGPO setting on LIBERO-Spatial
++  adv_type: grpo
++  loss_type: embodied_dgpo
++  loss_agg_func: "token-mean" 
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++
++  # DGPO (arXiv:2510.08425). Math: rlinf/algorithms/dgpo.py
++  dgpo_beta: 10000.0            # paper uses 100; here z ~ 1e-2 so 100 left the gate at 0.5 (run 54407201)
++  dgpo_t_min: 0.3               # timestep clip: t ~ U[t_min, t_max], t=1 is noise (pi0 convention)
++  dgpo_t_max: 1.0
++  dgpo_share_t_in_group: True   # one t per group, as the official code shares t across the batch
++  dgpo_traj_reduction: mean     # sum collapsed run 54407201: failures run 48 chunks, successes stop early, so sum(A_i*n_i) < 0
++  dgpo_adv_clip: 5.0
++  dgpo_kl_beta: 0.0             # optional velocity-space KL to the reference
++  dgpo_num_minibatches: 1       # optimizer steps per pass; each is group-aligned and exact
++  dgpo_loss_dims: executed      # executed = [:action_chunk, :action_env_dim], as piRL's log-probs
++  dgpo_ref_offload: True        # frozen SFT reference lives on CPU between uses
++  dgpo_loss_scale: 100.0        # constant; keeps grads well above Adam eps (smoke 54402772: norm ~5e-3 at 1.0)
++  nft_tau: 1.0                  # rollout policy theta^-: 1.0 = on-policy. Paper: [1.0, 0.7, 200, 200]
++env:
++  group_name: "EnvGroup"
++
++  train:
++    auto_reset: False            # DGPO needs per-trajectory masks
++    ignore_terminations: False
++    group_size: ${algorithm.group_size}
++    rollout_epoch: 8
++    total_num_envs: 64
++    max_episode_steps: 480 # for truncation
++    max_steps_per_rollout_epoch: 480
++    reward_coef: ${algorithm.reward_coef}
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/train
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 50
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 480
++    max_steps_per_rollout_epoch: 9600
++    use_fixed_reset_state_ids: True
++    use_ordered_reset_state_ids: True
++    is_eval: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-CALVIN-ABC-D-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-CALVIN-ABC-D-SFT
++    precision: ${actor.model.precision}
++
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++
++  micro_batch_size: 128
++  global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
++  seed: 42
++  enable_offload: False
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-CALVIN-ABC-D-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-CALVIN-ABC-D-SFT
++    model_type: "openpi"
++    num_action_chunks: 5
++    add_value_head: False
++    # openpi specific parameters
++    openpi:
++      is_nft: True             # stores the clean chunk nft_x0 that DGPO trains on
++      noise_method: "flow_sde"   # DGPO w/ SDE: ODE rollouts gave no signal on LIBERO
++      noise_level: 0.3           # 0.5/sqrt(3): noise on all 3-4 steps ~ piRL's one step at 0.5
++      joint_logprob: False
++      config_name: "pi05_calvin"
++      num_images_in_input: 2
++      value_after_vlm: True
++      value_vlm_mode: "mean_token"
++
++  optim:
++    lr: 5.0e-6
++    value_lr: 1.0e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    clip_grad: 1.0
++    weight_decay: 0.01
++    critic_warmup_steps: 0
++
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/calvin_abc_d_grpo_openpi_pi05.yaml b/examples/embodiment/config/calvin_abc_d_grpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..e6418333
+--- /dev/null
++++ b/examples/embodiment/config/calvin_abc_d_grpo_openpi_pi05.yaml
+@@ -0,0 +1,150 @@
++defaults:
++  - env/calvin_abc@env.train
++  - env/calvin_d@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "calvin_abc_d_grpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++
++  only_eval: False
++  val_check_interval: -1
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: token_level
++
++  update_epoch: 1          # πRL GRPO (libero_spatial_grpo_openpi_pi05)
++  adv_type: grpo
++  loss_type: actor
++  loss_agg_func: "token-mean" 
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++env:
++  group_name: "EnvGroup"
++
++  train:
++    auto_reset: False            # one episode per trajectory, as in the DGPO runs
++    ignore_terminations: False
++    group_size: ${algorithm.group_size}
++    rollout_epoch: 8
++    total_num_envs: 64
++    max_episode_steps: 480 # for truncation
++    max_steps_per_rollout_epoch: 480
++    reward_coef: ${algorithm.reward_coef}
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/train
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 50
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 480
++    max_steps_per_rollout_epoch: 9600
++    use_fixed_reset_state_ids: True
++    use_ordered_reset_state_ids: True
++    is_eval: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-CALVIN-ABC-D-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-CALVIN-ABC-D-SFT
++    precision: ${actor.model.precision}
++
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++
++  micro_batch_size: 128
++  global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
++  seed: 42
++  enable_offload: False
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-CALVIN-ABC-D-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-CALVIN-ABC-D-SFT
++    model_type: "openpi"
++    num_action_chunks: 5
++    add_value_head: False
++    # openpi specific parameters
++    openpi:
++      noise_method: "flow_sde"   # πRL Flow-SDE: noise at one random denoise step
++      noise_level: 0.5
++      joint_logprob: False
++      config_name: "pi05_calvin"
++      num_images_in_input: 2
++      value_after_vlm: True
++      value_vlm_mode: "mean_token"
++
++  optim:
++    lr: 5.0e-6
++    value_lr: 1.0e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    clip_grad: 1.0
++    weight_decay: 0.01
++    critic_warmup_steps: 0
++
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/libero_10_dgpo_openpi_pi05.yaml b/examples/embodiment/config/libero_10_dgpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..4a1a7557
+--- /dev/null
++++ b/examples/embodiment/config/libero_10_dgpo_openpi_pi05.yaml
+@@ -0,0 +1,156 @@
++defaults:
++  - env/libero_10@env.train
++  - env/libero_10@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "libero_10_dgpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++
++  only_eval: False
++  val_check_interval: -1
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: token_level
++  update_epoch: 2          # best DGPO setting found on Spatial (54431345)
++  adv_type: grpo
++  loss_type: embodied_dgpo
++  loss_agg_func: "token-mean" 
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++
++  # DGPO (arXiv:2510.08425). Math: rlinf/algorithms/dgpo.py
++  dgpo_beta: 10000.0            # paper uses 100; here z ~ 1e-2 so 100 left the gate at 0.5 (run 54407201)
++  dgpo_t_min: 0.3               # timestep clip: t ~ U[t_min, t_max], t=1 is noise (pi0 convention)
++  dgpo_t_max: 1.0
++  dgpo_share_t_in_group: True   # one t per group, as the official code shares t across the batch
++  dgpo_traj_reduction: mean     # sum collapsed run 54407201: failures run 48 chunks, successes stop early, so sum(A_i*n_i) < 0
++  dgpo_adv_clip: 5.0
++  dgpo_kl_beta: 0.0             # optional velocity-space KL to the reference
++  dgpo_num_minibatches: 1       # optimizer steps per pass; each is group-aligned and exact
++  dgpo_loss_dims: executed      # executed = [:action_chunk, :action_env_dim], as piRL's log-probs
++  dgpo_ref_offload: True        # frozen SFT reference lives on CPU between uses
++  dgpo_loss_scale: 100.0        # constant; keeps grads well above Adam eps (smoke 54402772: norm ~5e-3 at 1.0)
++  nft_tau: 1.0                  # rollout policy theta^-: 1.0 = on-policy. Paper: [1.0, 0.7, 200, 200]
++env:
++  group_name: "EnvGroup"
++
++  train:
++    rollout_epoch: 8
++    total_num_envs: 64
++    max_episode_steps: 480 # max episode steps for truncation
++    max_steps_per_rollout_epoch: 480
++    reward_coef: ${algorithm.reward_coef}
++    group_size: ${algorithm.group_size}
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 500
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 480
++    max_steps_per_rollout_epoch: 480
++    group_size: 1
++    use_fixed_reset_state_ids: True
++    is_eval: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  unnorm_key: libero_10
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-LIBERO-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-LIBERO-SFT
++    precision: ${actor.model.precision}
++
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++  micro_batch_size: 128
++  global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
++  seed: 42
++  enable_offload: False
++
++  # Override the default values in model/pi0_5
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-LIBERO-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-LIBERO-SFT
++    num_steps: 4         # same inference budget as the piRL GRPO Long config
++    openpi:
++      is_nft: True           # stores the clean chunk nft_x0 that DGPO trains on
++      noise_method: "flow_ode"   # DGPO paper setting: deterministic ODE rollouts
++      noise_level: 0.0
++
++  optim:
++    lr: 5.0e-6
++    value_lr: 1.0e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    clip_grad: 1.0
++    weight_decay: 0.01
++
++  # Override the default values in hybrid_engines/fsdp
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++    mixed_precision:
++      param_dtype: ${actor.model.precision}
++      reduce_dtype: ${actor.model.precision}
++      buffer_dtype: ${actor.model.precision}
++    
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/libero_spatial_dgpo_openpi_pi05.yaml b/examples/embodiment/config/libero_spatial_dgpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..47dcc38c
+--- /dev/null
++++ b/examples/embodiment/config/libero_spatial_dgpo_openpi_pi05.yaml
+@@ -0,0 +1,157 @@
++defaults:
++  - env/libero_spatial@env.train
++  - env/libero_spatial@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "libero_spatial_dgpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++
++  only_eval: False
++  val_check_interval: -1
++  save_interval: 10   # a 12 h run is ~26 steps; 40 never saves
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: token_level
++  update_epoch: 4          # DGPO: passes over the rollout, each with fresh (t, eps); the paper's M=4
++
++  adv_type: grpo
++  loss_type: embodied_dgpo
++  loss_agg_func: "token-mean" 
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++
++  # DGPO (arXiv:2510.08425). Math: rlinf/algorithms/dgpo.py
++  dgpo_beta: 10000.0            # paper uses 100; here z ~ 1e-2 so 100 left the gate at 0.5 (run 54407201)
++  dgpo_t_min: 0.3               # timestep clip: t ~ U[t_min, t_max], t=1 is noise (pi0 convention)
++  dgpo_t_max: 1.0
++  dgpo_share_t_in_group: True   # one t per group, as the official code shares t across the batch
++  dgpo_traj_reduction: mean     # sum collapsed run 54407201: failures run 48 chunks, successes stop early, so sum(A_i*n_i) < 0
++  dgpo_adv_clip: 5.0
++  dgpo_kl_beta: 0.0             # optional velocity-space KL to the reference
++  dgpo_num_minibatches: 1       # optimizer steps per pass; each is group-aligned and exact
++  dgpo_loss_dims: executed      # executed = [:action_chunk, :action_env_dim], as piRL's log-probs
++  dgpo_ref_offload: True        # frozen SFT reference lives on CPU between uses
++  dgpo_loss_scale: 100.0        # constant; keeps grads well above Adam eps (smoke 54402772: norm ~5e-3 at 1.0)
++  nft_tau: 1.0                  # rollout policy theta^-: 1.0 = on-policy. Paper: [1.0, 0.7, 200, 200]
++env:
++  group_name: "EnvGroup"
++
++  # Override the default values in env/libero_spatial
++  train:
++    rollout_epoch: 8
++    total_num_envs: 64
++    group_size: ${algorithm.group_size}
++    max_episode_steps: 240 # max episode steps for truncation
++    max_steps_per_rollout_epoch: 240
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 500
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 240
++    max_steps_per_rollout_epoch: 240
++    group_size: 1
++    is_eval: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  unnorm_key: libero_10
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-LIBERO-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-LIBERO-SFT
++    precision: ${actor.model.precision}
++
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++  micro_batch_size: 128
++  global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
++  seed: 42
++  enable_offload: False
++
++  # Override the default values in model/pi0_5
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-LIBERO-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-LIBERO-SFT
++    num_action_chunks: 5 # interface for the env
++    num_steps: 3         # same inference budget as the piRL GRPO baseline
++    openpi:
++      is_nft: True           # stores the clean chunk nft_x0 that DGPO trains on
++      noise_method: "flow_ode"   # deterministic ODE rollouts; flow_sde gives "DGPO w/ SDE"
++      noise_level: 0.0
++
++  optim:
++    lr: 5.0e-6
++    value_lr: 1.0e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    weight_decay: 0.01
++    clip_grad: 1.0
++
++  # Override the default values in hybrid_engines/fsdp
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++    mixed_precision:
++      param_dtype: ${actor.model.precision}
++      reduce_dtype: ${actor.model.precision}
++      buffer_dtype: ${actor.model.precision}
++
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/maniskill_dgpo_openpi_pi05.yaml b/examples/embodiment/config/maniskill_dgpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..d0d31733
+--- /dev/null
++++ b/examples/embodiment/config/maniskill_dgpo_openpi_pi05.yaml
+@@ -0,0 +1,172 @@
++defaults:
++  - env/maniskill_put_on_plate_in_scene_25_main@env.train
++  - env/maniskill_put_on_plate_in_scene_25_main@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "maniskill_dgpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++  only_eval: False
++  val_check_interval: 10
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: chunk_level
++  update_epoch: 2          # best DGPO setting on LIBERO-Spatial
++  
++  adv_type: grpo
++  loss_type: embodied_dgpo
++  loss_agg_func: "token-mean" 
++  
++  bootstrap_type: always # [standard, always]. Bootstrap Q-values according to terminations and truncations. "standard" only bootstraps when truncations, while "always" bootstraps when truncations or terminations.
++  kl_beta: 0.0
++  entropy_bonus: 0.005
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++
++  # DGPO (arXiv:2510.08425). Math: rlinf/algorithms/dgpo.py
++  dgpo_beta: 10000.0            # paper uses 100; here z ~ 1e-2 so 100 left the gate at 0.5 (run 54407201)
++  dgpo_t_min: 0.3               # timestep clip: t ~ U[t_min, t_max], t=1 is noise (pi0 convention)
++  dgpo_t_max: 1.0
++  dgpo_share_t_in_group: True   # one t per group, as the official code shares t across the batch
++  dgpo_traj_reduction: mean     # sum collapsed run 54407201: failures run 48 chunks, successes stop early, so sum(A_i*n_i) < 0
++  dgpo_adv_clip: 5.0
++  dgpo_kl_beta: 0.0             # optional velocity-space KL to the reference
++  dgpo_num_minibatches: 1       # optimizer steps per pass; each is group-aligned and exact
++  dgpo_loss_dims: executed      # executed = [:action_chunk, :action_env_dim], as piRL's log-probs
++  dgpo_ref_offload: True        # frozen SFT reference lives on CPU between uses
++  dgpo_loss_scale: 100.0        # constant; keeps grads well above Adam eps (smoke 54402772: norm ~5e-3 at 1.0)
++  nft_tau: 1.0                  # rollout policy theta^-: 1.0 = on-policy. Paper: [1.0, 0.7, 200, 200]
++env:
++  group_name: "EnvGroup"
++
++  # Override the default values in env/train or env/eval
++  train:
++    auto_reset: False            # DGPO needs per-trajectory masks
++    ignore_terminations: False
++    group_size: ${algorithm.group_size}
++    rollout_epoch: 1
++    total_num_envs: 320
++    use_fixed_reset_state_ids: False
++    max_episode_steps: 80 # max episode steps for truncation
++    max_steps_per_rollout_epoch: 80
++    init_params:
++      use_multiple_plates: False
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 320
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 80
++    max_steps_per_rollout_epoch: 80
++    use_fixed_reset_state_ids: True
++    group_size: ${algorithm.group_size}
++    is_eval: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++    init_params:
++      use_multiple_plates: False
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  unnorm_key: libero_10
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-ManiSkill-25Main-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-ManiSkill-25Main-SFT
++    precision: ${actor.model.precision}
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++  micro_batch_size: 128
++  global_batch_size: 5120   # after how many sampled examples we perform one loss backward pass. Requirement: global bz must be '_world_size' multiples of local bs.
++  seed: 0
++  enable_offload: False
++  # Override the default values in model/pi0_5
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-ManiSkill-25Main-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-ManiSkill-25Main-SFT
++    model_type: "openpi"
++    add_value_head: False
++    num_action_chunks: 5 # interface for the env
++    num_steps: 4
++    # openpi specific parameters
++    openpi:
++      is_nft: True             # stores the clean chunk nft_x0 that DGPO trains on
++      noise_method: "flow_sde"   # DGPO w/ SDE: ODE rollouts gave no signal on LIBERO
++      noise_level: 0.3           # 0.5/sqrt(3): noise on all 3-4 steps ~ piRL's one step at 0.5
++      joint_logprob: False
++      value_after_vlm: True
++      config_name: "pi05_maniskill"
++      num_images_in_input: 1
++      action_horizon: 8
++    policy_setup: widowx_bridge
++
++  optim:
++    lr: 7.91e-6
++    value_lr: 1.55e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    clip_grad: 1.0
++    critic_warmup_steps: 0
++
++  # Override the default values in hybrid_engines/fsdp
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"   
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++    mixed_precision:
++      param_dtype: ${actor.model.precision}
++      reduce_dtype: ${actor.model.precision}
++      buffer_dtype: ${actor.model.precision}
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/maniskill_grpo_openpi_pi05.yaml b/examples/embodiment/config/maniskill_grpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..8dbad9e4
+--- /dev/null
++++ b/examples/embodiment/config/maniskill_grpo_openpi_pi05.yaml
+@@ -0,0 +1,157 @@
++defaults:
++  - env/maniskill_put_on_plate_in_scene_25_main@env.train
++  - env/maniskill_put_on_plate_in_scene_25_main@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "maniskill_grpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++  only_eval: False
++  val_check_interval: 10
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: chunk_level
++  update_epoch: 1          # πRL GRPO (libero_spatial_grpo_openpi_pi05)
++  
++  adv_type: grpo
++  loss_type: actor
++  loss_agg_func: "token-mean" 
++  
++  bootstrap_type: always # [standard, always]. Bootstrap Q-values according to terminations and truncations. "standard" only bootstraps when truncations, while "always" bootstraps when truncations or terminations.
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++env:
++  group_name: "EnvGroup"
++
++  # Override the default values in env/train or env/eval
++  train:
++    auto_reset: False            # one episode per trajectory, as in the DGPO runs
++    ignore_terminations: False
++    group_size: ${algorithm.group_size}
++    rollout_epoch: 1
++    total_num_envs: 320
++    use_fixed_reset_state_ids: False
++    max_episode_steps: 80 # max episode steps for truncation
++    max_steps_per_rollout_epoch: 80
++    init_params:
++      use_multiple_plates: False
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 320
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 80
++    max_steps_per_rollout_epoch: 80
++    use_fixed_reset_state_ids: True
++    group_size: ${algorithm.group_size}
++    is_eval: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++    init_params:
++      use_multiple_plates: False
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  unnorm_key: libero_10
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-ManiSkill-25Main-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-ManiSkill-25Main-SFT
++    precision: ${actor.model.precision}
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++  micro_batch_size: 32      # how many samples each GPU processes per sampling step
++  global_batch_size: 5120   # after how many sampled examples we perform one loss backward pass. Requirement: global bz must be '_world_size' multiples of local bs.
++  seed: 0
++  enable_offload: False
++  # Override the default values in model/pi0_5
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-ManiSkill-25Main-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-ManiSkill-25Main-SFT
++    model_type: "openpi"
++    add_value_head: False
++    num_action_chunks: 5 # interface for the env
++    num_steps: 4
++    # openpi specific parameters
++    openpi:
++      noise_method: "flow_sde"   # πRL Flow-SDE: noise at one random denoise step
++      noise_level: 0.5
++      joint_logprob: False
++      value_after_vlm: True
++      config_name: "pi05_maniskill"
++      num_images_in_input: 1
++      action_horizon: 8
++    policy_setup: widowx_bridge
++
++  optim:
++    lr: 7.91e-6
++    value_lr: 1.55e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    clip_grad: 1.0
++    critic_warmup_steps: 0
++
++  # Override the default values in hybrid_engines/fsdp
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"   
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++    mixed_precision:
++      param_dtype: ${actor.model.precision}
++      reduce_dtype: ${actor.model.precision}
++      buffer_dtype: ${actor.model.precision}
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/metaworld_50_dgpo_openpi_pi05.yaml b/examples/embodiment/config/metaworld_50_dgpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..22fa1c6a
+--- /dev/null
++++ b/examples/embodiment/config/metaworld_50_dgpo_openpi_pi05.yaml
+@@ -0,0 +1,169 @@
++defaults:
++  - env/metaworld_50@env.train
++  - env/metaworld_50@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "metaworld_50_dgpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++
++  only_eval: False
++  val_check_interval: -1
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: token_level
++
++  update_epoch: 2          # best DGPO setting on LIBERO-Spatial
++  adv_type: grpo
++  loss_type: embodied_dgpo
++  loss_agg_func: "token-mean" 
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++
++  # DGPO (arXiv:2510.08425). Math: rlinf/algorithms/dgpo.py
++  dgpo_beta: 10000.0            # paper uses 100; here z ~ 1e-2 so 100 left the gate at 0.5 (run 54407201)
++  dgpo_t_min: 0.3               # timestep clip: t ~ U[t_min, t_max], t=1 is noise (pi0 convention)
++  dgpo_t_max: 1.0
++  dgpo_share_t_in_group: True   # one t per group, as the official code shares t across the batch
++  dgpo_traj_reduction: mean     # sum collapsed run 54407201: failures run 48 chunks, successes stop early, so sum(A_i*n_i) < 0
++  dgpo_adv_clip: 5.0
++  dgpo_kl_beta: 0.0             # optional velocity-space KL to the reference
++  dgpo_num_minibatches: 1       # optimizer steps per pass; each is group-aligned and exact
++  dgpo_loss_dims: executed      # executed = [:action_chunk, :action_env_dim], as piRL's log-probs
++  dgpo_ref_offload: True        # frozen SFT reference lives on CPU between uses
++  dgpo_loss_scale: 100.0        # constant; keeps grads well above Adam eps (smoke 54402772: norm ~5e-3 at 1.0)
++  nft_tau: 1.0                  # rollout policy theta^-: 1.0 = on-policy. Paper: [1.0, 0.7, 200, 200]
++env:
++  group_name: "EnvGroup"
++
++  # Override the default values in env/metaworld_50
++  train:
++    auto_reset: False            # DGPO needs per-trajectory masks
++    ignore_terminations: False
++    group_size: ${algorithm.group_size}
++    rollout_epoch: 8
++    total_num_envs: 64
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 500
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 100
++    max_steps_per_rollout_epoch: 100
++    group_size: 1
++    use_fixed_reset_state_ids: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  unnorm_key: libero_10
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-MetaWorld-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-MetaWorld-SFT
++    precision: ${actor.model.precision}
++
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++  micro_batch_size: 128
++  global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
++  seed: 42
++  enable_offload: False
++
++  # Override the default values in model/pi0_5
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-MetaWorld-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-MetaWorld-SFT
++    num_action_chunks: 5 # interface for the env
++    action_dim: 4
++    add_value_head: False
++    # openpi specific parameters
++    openpi:
++      is_nft: True             # stores the clean chunk nft_x0 that DGPO trains on
++      noise_method: "flow_sde"   # DGPO w/ SDE: ODE rollouts gave no signal on LIBERO
++      noise_level: 0.3           # 0.5/sqrt(3): noise on all 3-4 steps ~ piRL's one step at 0.5
++      joint_logprob: False
++      config_name: "pi05_metaworld"
++      num_images_in_input: 1
++      value_after_vlm: True
++
++  optim:
++    lr: 5.0e-6
++    value_lr: 1.0e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    weight_decay: 0.01
++    clip_grad: 1.0
++    critic_warmup_steps: 0
++    total_training_steps: ${runner.max_epochs}
++    lr_warmup_steps: -1
++    lr_scheduler: "cosine" # Learning rate scheduler type. Choices: ["constant", "cosine"]. Default: "constant".
++    num_cycles: 0.5
++
++  # Override the default values in hybrid_engines/fsdp
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++    mixed_precision:
++      param_dtype: ${actor.model.precision}
++      reduce_dtype: ${actor.model.precision}
++      buffer_dtype: ${actor.model.precision}
++
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/config/metaworld_50_grpo_openpi_pi05.yaml b/examples/embodiment/config/metaworld_50_grpo_openpi_pi05.yaml
+new file mode 100644
+index 00000000..91b47008
+--- /dev/null
++++ b/examples/embodiment/config/metaworld_50_grpo_openpi_pi05.yaml
+@@ -0,0 +1,154 @@
++defaults:
++  - env/metaworld_50@env.train
++  - env/metaworld_50@env.eval
++  - model/pi0_5@actor.model
++  - hybrid_engines/fsdp@actor.fsdp_config
++  - weight_syncer/patch_syncer@weight_syncer
++  - override hydra/job_logging: stdout
++
++hydra:
++  run:
++    dir: .
++  output_subdir: null
++  searchpath:
++    - file://${oc.env:EMBODIED_PATH}/config/
++
++cluster:
++  num_nodes: 1
++  component_placement:
++    actor,env,rollout: all
++
++runner:
++  task_type: embodied
++  logger:
++    log_path: "../results"
++    project_name: rlinf
++    experiment_name: "metaworld_50_grpo_openpi_pi05"
++    logger_backends: ["tensorboard"] # wandb, swanlab
++
++  max_epochs: 1000
++  max_steps: -1
++
++  only_eval: False
++  val_check_interval: -1
++  save_interval: 10
++
++  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
++  ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
++
++algorithm:
++  normalize_advantages: True
++  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
++  group_size: 8
++  reward_coef: 1.0
++
++
++  reward_type: chunk_level
++  logprob_type: chunk_level
++  entropy_type: token_level
++
++  update_epoch: 1          # πRL GRPO (libero_spatial_grpo_openpi_pi05)
++  adv_type: grpo
++  loss_type: actor
++  loss_agg_func: "token-mean" 
++  kl_beta: 0.0
++  entropy_bonus: 0
++  clip_ratio_high: 0.2
++  clip_ratio_low: 0.2
++  clip_ratio_c: 3.0
++  value_clip: 0.2
++  huber_delta: 10.0
++
++  gamma: 0.99
++  gae_lambda: 0.95
++
++  filter_rewards: True
++  rewards_lower_bound: 0.1
++  rewards_upper_bound: 0.9
++env:
++  group_name: "EnvGroup"
++
++  # Override the default values in env/metaworld_50
++  train:
++    auto_reset: False            # one episode per trajectory, as in the DGPO runs
++    ignore_terminations: False
++    group_size: ${algorithm.group_size}
++    rollout_epoch: 8
++    total_num_envs: 64
++  eval:
++    rollout_epoch: 1
++    total_num_envs: 500
++    auto_reset: True
++    ignore_terminations: True
++    max_episode_steps: 100
++    max_steps_per_rollout_epoch: 100
++    group_size: 1
++    use_fixed_reset_state_ids: True
++    video_cfg:
++      save_video: True
++      video_base_dir: ${runner.logger.log_path}/video/eval
++
++rollout:
++  group_name: "RolloutGroup"
++  generation_backend: "huggingface"
++  recompute_logprobs: False
++  unnorm_key: libero_10
++  enable_offload: False
++  pipeline_stage_num: 1
++
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-MetaWorld-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-MetaWorld-SFT
++    precision: ${actor.model.precision}
++
++actor:
++  group_name: "ActorGroup"
++  training_backend: "fsdp"
++  micro_batch_size: 128
++  global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
++  seed: 42
++  enable_offload: False
++
++  # Override the default values in model/pi0_5
++  model:
++    model_path: "/path/to/model/RLinf-Pi05-MetaWorld-SFT" # https://huggingface.co/RLinf/RLinf-Pi05-MetaWorld-SFT
++    num_action_chunks: 5 # interface for the env
++    action_dim: 4
++    add_value_head: False
++    # openpi specific parameters
++    openpi:
++      noise_method: "flow_sde"   # πRL Flow-SDE: noise at one random denoise step
++      noise_level: 0.5
++      joint_logprob: False
++      config_name: "pi05_metaworld"
++      num_images_in_input: 1
++      value_after_vlm: True
++
++  optim:
++    lr: 5.0e-6
++    value_lr: 1.0e-4
++    adam_beta1: 0.9
++    adam_beta2: 0.95
++    adam_eps: 1.0e-08
++    weight_decay: 0.01
++    clip_grad: 1.0
++    critic_warmup_steps: 0
++    total_training_steps: ${runner.max_epochs}
++    lr_warmup_steps: -1
++    lr_scheduler: "cosine" # Learning rate scheduler type. Choices: ["constant", "cosine"]. Default: "constant".
++    num_cycles: 0.5
++
++  # Override the default values in hybrid_engines/fsdp
++  fsdp_config:
++    strategy: "fsdp"
++    sharding_strategy: "no_shard"
++    gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
++    mixed_precision:
++      param_dtype: ${actor.model.precision}
++      reduce_dtype: ${actor.model.precision}
++      buffer_dtype: ${actor.model.precision}
++
++reward:
++  use_reward_model: False
++
++critic:
++  use_critic_model: False
+\ No newline at end of file
+diff --git a/examples/embodiment/train_embodied_agent.py b/examples/embodiment/train_embodied_agent.py
+index 3e81801b..a681d525 100644
+--- a/examples/embodiment/train_embodied_agent.py
++++ b/examples/embodiment/train_embodied_agent.py
+@@ -90,6 +90,14 @@ def main(cfg) -> None:
+         from rlinf.workers.actor.fsdp_nft_policy_worker import EmbodiedNFTFSDPPolicy
+ 
+         actor_worker_cls = EmbodiedNFTFSDPPolicy
++    elif cfg.algorithm.loss_type == "embodied_dgpo":
++        if use_training_pipeline:
++            raise ValueError(
++                "runner.use_training_pipeline=True is not supported for embodied_dgpo."
++            )
++        from rlinf.workers.actor.fsdp_dgpo_policy_worker import EmbodiedDGPOFSDPPolicy
++
++        actor_worker_cls = EmbodiedDGPOFSDPPolicy
+     else:
+         if use_training_pipeline:
+             from rlinf.workers.actor.fsdp_actor_worker_pipeline import (
+diff --git a/rlinf/algorithms/dgpo.py b/rlinf/algorithms/dgpo.py
+new file mode 100644
+index 00000000..d889896c
+--- /dev/null
++++ b/rlinf/algorithms/dgpo.py
+@@ -0,0 +1,170 @@
++# Copyright 2026 The RLinf Authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     https://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Direct Group Preference Optimization (DGPO, arXiv:2510.08425) for flow VLAs.
++
++DGPO's Eq. (17) for a group G of samples sharing a condition c:
++
++    L = -log sigmoid( -beta * sum_{x in G} A(x) * [L_theta(x) - L_ref(x)] )
++
++where A is the GRPO-normalised advantage (so sum_{G+}|A| = sum_{G-}|A| and the
++partition function Z(c) cancels) and L_* is the denoising (DSM) loss on the
++forward-noised sample.
++
++In an embodied MDP a "sample" is a trajectory and the shared condition is the
++reset state, which RLinf's GRPO groups already share. The trajectory
++log-ratio is the sum over its action chunks (the dynamics cancel), so each
++trajectory contributes
++
++    ell_i = sum_k valid_ik * (L_theta_ik - L_ref_ik) * r_i
++
++with r_i = 1/T ("sum": a constant, so Z still cancels exactly) or 1/n_i
++("mean": length-normalised, heuristic).
++
++The sigmoid wraps a sum over every chunk of every trajectory in the group, so
++the loss does not decompose over micro-batches. Its gradient does:
++
++    d L_g / d L_theta_ik = sigmoid(-z_g) * beta * A_i * r_i / G
++
++so we compute z_g with detached losses first and then backprop the surrogate
++sum_ik coef_ik * L_theta_ik with coef_ik = sigmoid(-z_g) * A_i * r_i * T. The
++constant beta/(G*T) is dropped from the gradient, as in the official code
++(``compute_group_dgpo_loss_allreduce``), so beta only sets the sigmoid's
++operating point and not the step size.
++"""
++
++from dataclasses import dataclass
++
++import torch
++
++
++@dataclass
++class DGPOGroupStats:
++    coef: torch.Tensor  # [T, B] per-chunk surrogate coefficient (detached)
++    z: torch.Tensor  # [num_groups] group logit, positive = preference satisfied
++    gate: torch.Tensor  # [num_groups] sigmoid(-z)
++    ell: torch.Tensor  # [B] per-trajectory implicit log-ratio estimate
++
++
++def dsm_loss(
++    v_pred: torch.Tensor, v_target: torch.Tensor, action_chunk: int, action_dim: int
++) -> torch.Tensor:
++    """Per-sample velocity MSE over the executed slice [:action_chunk, :action_dim]."""
++    diff = (
++        v_pred[:, :action_chunk, :action_dim].float()
++        - v_target[:, :action_chunk, :action_dim].float()
++    )
++    return diff.square().flatten(1).mean(dim=1)
++
++
++def dgpo_group_coefficients(
++    delta: torch.Tensor,
++    adv: torch.Tensor,
++    valid: torch.Tensor,
++    group_size: int,
++    beta: float,
++    traj_reduction: str = "sum",
++) -> DGPOGroupStats:
++    """Group logits and per-chunk surrogate coefficients.
++
++    Args:
++        delta: [T, B] detached L_theta - L_ref per chunk (ignored where not valid).
++        adv: [B] per-trajectory advantage (zero-sum within each group).
++        valid: [T, B] bool, chunks that belong to the trajectory (before done).
++        group_size: trajectories per group; groups are contiguous along B.
++        beta: DGPO temperature.
++        traj_reduction: "sum" (divide by the fixed horizon T) or "mean" (divide
++            by each trajectory's own valid length).
++    """
++    T, B = delta.shape
++    assert B % group_size == 0, f"batch {B} not divisible by group_size {group_size}"
++    valid_f = valid.to(delta.dtype)
++    if traj_reduction == "sum":
++        r = torch.full((B,), 1.0 / T, dtype=delta.dtype, device=delta.device)
++    elif traj_reduction == "mean":
++        r = 1.0 / valid_f.sum(dim=0).clamp_min(1.0)
++    else:
++        raise ValueError(f"Unsupported dgpo_traj_reduction: {traj_reduction}")
++
++    ell = (delta * valid_f).sum(dim=0) * r  # [B]
++    per_traj = adv.to(delta.dtype) * ell  # [B]
++    z = -beta * per_traj.view(-1, group_size).sum(dim=1) / group_size  # [num_groups]
++    gate = torch.sigmoid(-z)
++    gate_b = gate.repeat_interleave(group_size)  # [B]
++    coef = (gate_b * adv.to(delta.dtype) * r * T)[None, :] * valid_f  # [T, B]
++    return DGPOGroupStats(
++        coef=coef.detach(), z=z.detach(), gate=gate.detach(), ell=ell.detach()
++    )
++
++
++def dgpo_exact_loss(
++    l_theta: torch.Tensor,
++    l_ref: torch.Tensor,
++    adv: torch.Tensor,
++    valid: torch.Tensor,
++    group_size: int,
++    beta: float,
++    traj_reduction: str = "sum",
++) -> torch.Tensor:
++    """The undecomposed objective, mean over groups. Used by the tests only."""
++    T, B = l_theta.shape
++    valid_f = valid.to(l_theta.dtype)
++    if traj_reduction == "sum":
++        r = torch.full((B,), 1.0 / T, dtype=l_theta.dtype)
++    else:
++        r = 1.0 / valid_f.sum(dim=0).clamp_min(1.0)
++    ell = ((l_theta - l_ref) * valid_f).sum(dim=0) * r
++    z = -beta * (adv * ell).view(-1, group_size).sum(dim=1) / group_size
++    return torch.nn.functional.softplus(-z).mean()
++
++
++def trajectory_jerk(
++    actions: torch.Tensor, valid: torch.Tensor, num_action_chunks: int, dims: int = 6
++) -> torch.Tensor:
++    """Mean squared second difference of the executed actions, per trajectory.
++
++    Args:
++        actions: [T, B, num_action_chunks * action_dim] executed (env-space)
++            actions, one row per chunk step.
++        valid: [T, B] bool, chunk steps that belong to the trajectory.
++        num_action_chunks: actions executed per chunk step.
++        dims: leading action dims to score. LIBERO's first 6 are the
++            continuous delta pose; the gripper (dim 6) is a binary switch.
++
++    Returns:
++        [B] jerk J >= 0. Trajectories shorter than 3 actions get 0.
++    """
++    T, B, _ = actions.shape
++    a = actions.float().view(T, B, num_action_chunks, -1)[..., :dims]
++    a = a.permute(1, 0, 2, 3).reshape(B, T * num_action_chunks, dims)
++    m = valid.t().repeat_interleave(num_action_chunks, dim=1).to(a.dtype)  # [B, T*c]
++    d2 = a[:, 2:] - 2 * a[:, 1:-1] + a[:, :-2]
++    m2 = m[:, 2:] * m[:, 1:-1] * m[:, :-2]
++    return (d2.square().sum(-1) * m2).sum(1) / m2.sum(1).clamp_min(1.0)
++
++
++def prism_rloo_advantages(
++    success: torch.Tensor, quality: torch.Tensor, group_size: int, lam: float
++) -> torch.Tensor:
++    """Prism-GRPO (arXiv:2608.17423): R = success + lam * q, RLOO advantage.
++
++    A_i = R_i - mean_{j != i} R_j, with no division by the group std, so a
++    same-outcome group keeps the raw scale of lam * delta_q instead of being
++    blown up to unit variance. The advantages sum to zero within each group,
++    which is what DGPO needs for Z(c) to cancel.
++    """
++    assert 0.0 < lam < 1.0, "lam < 1 keeps every success above every failure"
++    r = (success.float() + lam * quality.float()).view(-1, group_size)
++    loo_mean = (r.sum(dim=1, keepdim=True) - r) / (group_size - 1)
++    return (r - loo_mean).view(-1)
+diff --git a/rlinf/envs/sim/calvin/__init__.py b/rlinf/envs/sim/calvin/__init__.py
+index f17c1746..1e986109 100644
+--- a/rlinf/envs/sim/calvin/__init__.py
++++ b/rlinf/envs/sim/calvin/__init__.py
+@@ -11,6 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import os
+ import pathlib
+ from pathlib import Path
+ 
+@@ -65,6 +66,11 @@ def make_env(**kwargs):
+             "Please ensure that the calvin_env package is installed correctly."
+         )
+     render_conf = OmegaConf.load(Path(ENV_CFG_DIR) / ".hydra" / "merged_config.yaml")
++    # CALVIN_USE_EGL=0 falls back to pybullet's CPU TinyRenderer. The EGL
++    # plugin SIGABRTed mid-rollout on the Expanse GPU nodes (smoke 54459804),
++    # the same failure mode LIBERO's EGL showed there under GPU contention.
++    if os.environ.get("CALVIN_USE_EGL", "1") == "0":
++        render_conf.env.use_egl = False
+     if "scene" in kwargs:
+         scene_cfg = OmegaConf.load(
+             Path(ENV_CFG_DIR) / ".hydra" / f"{kwargs['scene']}.yaml"
+diff --git a/rlinf/models/embodiment/openpi/openpi_action_model.py b/rlinf/models/embodiment/openpi/openpi_action_model.py
+index 1cb4e8d0..bd8c7017 100644
+--- a/rlinf/models/embodiment/openpi/openpi_action_model.py
++++ b/rlinf/models/embodiment/openpi/openpi_action_model.py
+@@ -98,6 +98,10 @@ class OpenPi0Config(Pi0Config):
+ 
+     # ===== NFT-specific parameters =====
+     is_nft: bool = False
++    # With is_nft, rollouts put the sampler's noise on every denoise step. True
++    # instead picks one random step per chunk, exactly as the non-NFT Flow-SDE
++    # path (piRL's GRPO) does; DGPO only consumes nft_x0, so nothing else changes.
++    nft_single_noise_step: bool = False
+ 
+     # ===== RLT SFT parameters =====
+     use_rlt: bool = False
+@@ -1043,7 +1047,9 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
+         # denoise index
+         collect_nft_state = self.config.is_nft and mode == "train"
+         if mode == "train":
+-            if self.config.joint_logprob or collect_nft_state:
++            if self.config.joint_logprob or (
++                collect_nft_state and not self.config.nft_single_noise_step
++            ):
+                 denoise_inds = torch.arange(num_steps)
+             else:
+                 if self.config.ignore_last:
+diff --git a/rlinf/workers/actor/__init__.py b/rlinf/workers/actor/__init__.py
+index 69b20a26..483d1092 100644
+--- a/rlinf/workers/actor/__init__.py
++++ b/rlinf/workers/actor/__init__.py
+@@ -26,6 +26,7 @@ def get_actor_worker(cfg: DictConfig) -> type[Worker]:
+                 "embodied_sac",
+                 "embodied_dagger",
+                 "embodied_nft",
++                "embodied_dgpo",
+             }:
+                 raise ValueError(
+                     "runner.use_training_pipeline=True is not supported for "
+diff --git a/rlinf/workers/actor/fsdp_dgpo_policy_worker.py b/rlinf/workers/actor/fsdp_dgpo_policy_worker.py
+new file mode 100644
+index 00000000..5f2462a6
+--- /dev/null
++++ b/rlinf/workers/actor/fsdp_dgpo_policy_worker.py
+@@ -0,0 +1,459 @@
++# Copyright 2026 The RLinf Authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     https://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""DGPO actor for flow VLAs (see ``rlinf/algorithms/dgpo.py`` for the math).
++
++Rollouts are the NFT ones (``openpi.is_nft=True``, ``noise_method=flow_ode``),
++which store the clean chunk ``nft_x0`` the sampler produced. Training never
++touches the sampling chain: each valid chunk is re-noised by the forward
++process, x_t = (1-t) x0 + t eps with t ~ U[t_min, t_max], and scored by the
++velocity DSM loss of the policy and of a frozen reference (the SFT model).
++
++One optimizer step, for a group-aligned minibatch:
++  1. no-grad forward of theta on every active chunk -> delta = L_theta - L_ref
++  2. per-group logit z_g -> detached coefficient sigmoid(-z_g) * A_i
++  3. micro-batched backward of sum(coef * L_theta), which has exactly the
++     gradient of the group objective (the sigmoid does not decompose, its
++     gradient does).
++Groups never straddle ranks here (RLinf's GRPO advantages already assume it),
++so z_g needs no collective; only the micro-batch counts are aligned across
++ranks so the FSDP gradient sync happens on the same call everywhere.
++"""
++
++import math
++import os
++
++import numpy as np
++import torch
++import torch.distributed as dist
++from omegaconf import OmegaConf
++
++from rlinf.algorithms.dgpo import (
++    dgpo_group_coefficients,
++    dsm_loss,
++    prism_rloo_advantages,
++    trajectory_jerk,
++)
++from rlinf.models import get_model
++from rlinf.models.embodiment.base_policy import ForwardType
++from rlinf.scheduler.worker.worker import Worker
++from rlinf.utils.distributed import all_reduce_dict
++from rlinf.utils.metric_utils import append_to_dict
++from rlinf.utils.nested_dict_process import put_tensor_device
++from rlinf.utils.utils import clear_memory
++from rlinf.workers.actor.fsdp_nft_policy_worker import EmbodiedNFTFSDPPolicy
++
++
++def _gather_chunks(nested: dict, t_idx: torch.Tensor, b_idx: torch.Tensor) -> dict:
++    """Pick chunks (t_idx[n], b_idx[n]) out of [T, B, ...] tensors."""
++    out = {}
++    for key, value in nested.items():
++        if isinstance(value, torch.Tensor):
++            out[key] = value[t_idx, b_idx]
++        elif isinstance(value, dict):
++            out[key] = _gather_chunks(value, t_idx, b_idx)
++        else:
++            out[key] = value
++    return out
++
++
++def _trim_time(nested: dict, T: int) -> dict:
++    out = {}
++    for key, value in nested.items():
++        if isinstance(value, torch.Tensor):
++            assert value.shape[0] in (T, T + 1), (
++                f"forward_inputs[{key!r}] has time dim {value.shape[0]}, expected {T}"
++            )
++            out[key] = value[:T]
++        elif isinstance(value, dict):
++            out[key] = _trim_time(value, T)
++        else:
++            out[key] = value
++    return out
++
++
++class EmbodiedDGPOFSDPPolicy(EmbodiedNFTFSDPPolicy):
++    """Embodied FSDP policy worker for DGPO.
++
++    Inherits the NFT worker only for its rollout-policy EMA (``nft_tau``),
++    which is DGPO's theta^- (identity for a while, then EMA).
++    """
++
++    def init_worker(self) -> None:
++        super().init_worker()
++        self._ref_model = None
++        cfg = self.cfg.algorithm
++        self.dgpo_beta = float(cfg.get("dgpo_beta", 100.0))
++        self.dgpo_t_min = float(cfg.get("dgpo_t_min", 0.3))
++        self.dgpo_t_max = float(cfg.get("dgpo_t_max", 1.0))
++        self.dgpo_share_t = bool(cfg.get("dgpo_share_t_in_group", True))
++        self.dgpo_traj_reduction = str(cfg.get("dgpo_traj_reduction", "sum"))
++        self.dgpo_adv_clip = float(cfg.get("dgpo_adv_clip", 5.0))
++        self.dgpo_kl_beta = float(cfg.get("dgpo_kl_beta", 0.0))
++        self.dgpo_num_minibatches = int(cfg.get("dgpo_num_minibatches", 1))
++        self.dgpo_loss_dims = str(cfg.get("dgpo_loss_dims", "executed"))
++        self.dgpo_ref_offload = bool(cfg.get("dgpo_ref_offload", True))
++        # Stage 2: "prism" replaces the GRPO advantage with Prism-GRPO's
++        # R = success + lambda * q and its RLOO estimator. Needs
++        # algorithm.filter_rewards=False, or same-outcome groups are masked out
++        # before they reach this worker.
++        self.dgpo_reward = str(cfg.get("dgpo_reward", "binary"))
++        self.prism_lambda = float(cfg.get("prism_lambda", 0.5))
++        # Continuous action dims scored for smoothness. Default: all but the
++        # last (the gripper): 6 for LIBERO / ManiSkill / CALVIN, 3 for MetaWorld.
++        jd = cfg.get("prism_jerk_dims", None)
++        self.prism_jerk_dims = (
++            int(jd) if jd is not None else self.model.config.action_env_dim - 1
++        )
++        if self.dgpo_reward == "prism":
++            assert not cfg.get("filter_rewards", False), (
++                "dgpo_reward=prism needs algorithm.filter_rewards=False"
++            )
++        # Dynamic reference (the official code's use_ema_ref, from TDM-R1):
++        # after each update, ref <- ref + tau * (theta - ref). None keeps the
++        # frozen SFT reference. With a frozen reference the gate closes once
++        # the policy prefers successes more than SFT did (run 54420584: gate
++        # 0.5 -> 0.2, eval flat at 0.838 / 0.840 at steps 10 / 20); a
++        # trailing reference measures progress against the recent policy.
++        tau = cfg.get("dgpo_ref_ema_tau", None)
++        self.dgpo_ref_ema_tau = float(tau) if tau is not None else None
++        # The surrogate's scale is arbitrary (beta/(G*T) is already dropped).
++        # Under Adam it only matters against eps and grad clipping: DSM losses
++        # on the policy's own ODE samples are ~1e-3, giving grad norms ~5e-3.
++        self.dgpo_loss_scale = float(cfg.get("dgpo_loss_scale", 100.0))
++        assert 0.0 <= self.dgpo_t_min < self.dgpo_t_max <= 1.0
++        assert self.model.config.is_nft, (
++            "DGPO needs the clean rollout chunk; set actor.model.openpi.is_nft=True"
++        )
++
++    # ------------------------------------------------------------------ ref
++
++    def _get_ref_model(self):
++        """Frozen copy of the initial (SFT) policy, built from model_path.
++
++        Built with get_model rather than model_provider_func: the latter would
++        materialise it on the GPU first and apply runner.ckpt_path, and the
++        reference must stay the SFT policy.
++        """
++        if self._ref_model is None:
++            ref_cfg = OmegaConf.create(
++                OmegaConf.to_container(self.cfg.actor.model, resolve=True)
++            )
++            ref_cfg.load_to_device = False
++            ref = get_model(ref_cfg)
++            ref_config = getattr(ref, "config", None)
++            if hasattr(ref_config, "compile_transformer_forward"):
++                ref_config.compile_transformer_forward = False
++            ref.eval()
++            ref.requires_grad_(False)
++            ref.to("cpu" if self.dgpo_ref_offload else self.device)
++            self._ref_model = ref
++        return self._ref_model
++
++    @torch.no_grad()
++    def _update_ref_ema(self) -> None:
++        """Move the reference toward the current policy (no-op if frozen).
++
++        get_model_state_dict gathers under FSDP, so every rank calls this.
++        """
++        tau = self.dgpo_ref_ema_tau
++        if tau is None:
++            return
++        ref = self._get_ref_model()
++        current = self.get_model_state_dict(cpu_offload=True, full_state_dict=True)
++        ref_state = ref.state_dict()
++        for name, ref_tensor in ref_state.items():
++            src = current.get(name)
++            if src is None or not ref_tensor.is_floating_point():
++                continue
++            ref_tensor.lerp_(src.to(ref_tensor.device, ref_tensor.dtype), tau)
++        del current
++
++    def _prism_advantages(self, batch, fi, valid, T, G, metrics) -> torch.Tensor:
++        """Per-trajectory Prism-GRPO advantages; q = exp(-jerk / batch median)."""
++        rewards = batch["rewards"][:T].float().cpu()  # [T, B, num_action_chunks]
++        success = ((rewards.sum(-1) * valid).sum(0) > 0.5).float()
++        jerk = trajectory_jerk(
++            fi["action"].cpu(),
++            valid,
++            self.model.config.action_chunk,
++            dims=self.prism_jerk_dims,
++        )
++        quality = torch.exp(-jerk / jerk.median().clamp_min(1e-8))
++        adv = prism_rloo_advantages(success, quality, G, self.prism_lambda)
++        same = success.view(-1, G).std(dim=1) == 0
++        append_to_dict(
++            metrics,
++            {
++                "prism/success": success.mean().item(),
++                "prism/quality": quality.mean().item(),
++                "prism/jerk_median": jerk.median().item(),
++                "prism/same_outcome_group_frac": same.float().mean().item(),
++            },
++        )
++        return adv
++
++    def _loss_slice(self) -> tuple[int, int]:
++        cfg = self.model.config
++        if self.dgpo_loss_dims == "executed":
++            return cfg.action_chunk, cfg.action_env_dim
++        if self.dgpo_loss_dims == "full":
++            # nft_forward already truncates the horizon to action_chunk
++            return cfg.action_chunk, cfg.action_dim
++        raise ValueError(f"Unsupported dgpo_loss_dims: {self.dgpo_loss_dims}")
++
++    # ------------------------------------------------------------- forward
++
++    def _velocity(self, model, forward_inputs, x0, eps, t):
++        tb = t.view(-1, *([1] * (x0.ndim - 1))).to(x0.dtype)
++        x_t = (1.0 - tb) * x0 + tb * eps
++        with self.amp_context:
++            out = model(
++                forward_type=ForwardType.NFT,
++                forward_inputs=forward_inputs,
++                nft_inputs={"x_t": x_t, "timesteps": t.to(x0.dtype)},
++                compute_values=False,
++            )
++        return out["v_theta"], eps - x0
++
++    def _micro(self, fi, x0, eps, t, ids):
++        """Slice one micro-batch of chunks and move it to the device."""
++        t_idx, b_idx = ids[:, 0], ids[:, 1]
++        dev = f"{Worker.torch_device_type}:{int(os.environ['LOCAL_RANK'])}"
++        fi_mb = put_tensor_device(_gather_chunks(fi, t_idx, b_idx), dev)
++        return (
++            fi_mb,
++            x0[t_idx, b_idx].to(dev),
++            eps[t_idx, b_idx].to(dev),
++            t[t_idx, b_idx].to(dev),
++        )
++
++    @torch.no_grad()
++    def _nograd_losses(self, model, fi, x0, eps, t, ids, want_v=False):
++        chunk, dim = self._loss_slice()
++        mbs = self.cfg.actor.micro_batch_size
++        losses, vs = [], []
++        for s in range(0, ids.shape[0], mbs):
++            fi_mb, x0_mb, eps_mb, t_mb = self._micro(fi, x0, eps, t, ids[s : s + mbs])
++            v, target = self._velocity(model, fi_mb, x0_mb, eps_mb, t_mb)
++            losses.append(dsm_loss(v, target, chunk, dim).cpu())
++            if want_v:
++                vs.append(v[:, :chunk, :dim].float().cpu())
++        empty = torch.zeros(0)
++        return (
++            torch.cat(losses) if losses else empty,
++            torch.cat(vs) if (want_v and vs) else None,
++        )
++
++    # ------------------------------------------------------------ training
++
++    def _pad_ids(self, ids: torch.Tensor, filler: torch.Tensor):
++        """Pad to the same micro-batch count on every rank; returns (ids, n_micro, n_real)."""
++        n_real = ids.shape[0]
++        n = torch.tensor([n_real], device=self.device)
++        if dist.is_initialized():
++            dist.all_reduce(n, op=dist.ReduceOp.MAX)
++        n_max = int(n.item())
++        mbs = self.cfg.actor.micro_batch_size
++        n_micro = math.ceil(n_max / mbs) if n_max > 0 else 0
++        n_pad = n_micro * mbs - n_real
++        if n_pad > 0:
++            ids = torch.cat([ids, filler.expand(n_pad, 2)], dim=0)
++        return ids, n_micro, n_real
++
++    @Worker.timer("run_training")
++    def run_training(self) -> None:
++        if self.is_weight_offloaded:
++            self.load_param_and_grad(self.device)
++        if self.is_optimizer_offloaded:
++            self.load_optimizer(self.device)
++        self.model.train()
++
++        batch = self.rollout_batch
++        assert batch.get("loss_mask", None) is not None, (
++            "DGPO needs per-trajectory masks: env.train.auto_reset=False and "
++            "ignore_terminations=False"
++        )
++        adv_tb = batch["advantages"][..., 0].float().cpu()  # [T, B]
++        valid = batch["loss_mask"][..., 0].bool().cpu()  # [T, B]
++        T, B = adv_tb.shape
++        fi = _trim_time(batch["forward_inputs"], T)
++        x0 = fi["nft_x0"].float()  # [T, B, H, D]
++        G = int(self.cfg.algorithm.group_size)
++        assert B % G == 0, f"per-rank batch {B} not divisible by group_size {G}"
++        n_groups = B // G
++
++        # A_i is constant over a trajectory's valid chunks (zero where filtered)
++        adv = (adv_tb * valid).sum(0) / valid.sum(0).clamp_min(1)
++        metrics = {}
++        if self.dgpo_reward == "prism":
++            adv = self._prism_advantages(batch, fi, valid, T, G, metrics)
++        adv = adv.clamp(-self.dgpo_adv_clip, self.dgpo_adv_clip)
++        active = valid & (adv != 0)[None, :]
++        group_of_b = torch.arange(B) // G
++
++        # group-aligned minibatches; every rank has the same B so the same split
++        n_mb = self.dgpo_num_minibatches
++        assert n_groups % n_mb == 0, f"{n_groups} groups not divisible into {n_mb}"
++        group_perm = torch.randperm(n_groups)
++        mb_groups = group_perm.view(n_mb, -1)
++
++        chunk, dim = self._loss_slice()
++        mbs = self.cfg.actor.micro_batch_size
++        update_epoch = int(self.cfg.algorithm.get("update_epoch", 1))
++        for _ in range(update_epoch):
++            # fresh forward-process noise for this pass (DGPO Alg. 1, line 11)
++            if self.dgpo_share_t:
++                t_g = torch.empty(n_groups).uniform_(self.dgpo_t_min, self.dgpo_t_max)
++                t = t_g[group_of_b][None, :].expand(T, B).contiguous()
++            else:
++                t = torch.empty(T, B).uniform_(self.dgpo_t_min, self.dgpo_t_max)
++            eps = torch.randn_like(x0)
++
++            all_ids = active.nonzero()  # [N, 2] (t_idx, b_idx)
++            filler = torch.zeros(1, 2, dtype=all_ids.dtype)
++
++            # reference losses once per pass (the reference does not move)
++            ref = self._get_ref_model()
++            if self.dgpo_ref_offload:
++                ref.to(self.device)
++            l_ref_flat, v_ref_flat = self._nograd_losses(
++                ref, fi, x0, eps, t, all_ids, want_v=self.dgpo_kl_beta > 0
++            )
++            if self.dgpo_ref_offload:
++                ref.to("cpu")
++                clear_memory()
++            l_ref = torch.zeros(T, B)
++            l_ref[all_ids[:, 0], all_ids[:, 1]] = l_ref_flat
++            v_ref = None
++            if v_ref_flat is not None:
++                v_ref = torch.zeros(T, B, chunk, dim)
++                v_ref[all_ids[:, 0], all_ids[:, 1]] = v_ref_flat
++
++            for groups in mb_groups:
++                in_mb = torch.zeros(B, dtype=torch.bool)
++                for g in groups.tolist():
++                    in_mb[g * G : (g + 1) * G] = True
++                ids = all_ids[in_mb[all_ids[:, 1]]]
++                ids, n_micro, n_real = self._pad_ids(ids, filler)
++                if n_micro == 0:
++                    continue  # nothing to learn from on any rank
++
++                # 1. no-grad theta losses -> group logits (exact for this step)
++                l_th_flat, _ = self._nograd_losses(self.model, fi, x0, eps, t, ids)
++                real = ids[:n_real]
++                delta = torch.zeros(T, B)
++                delta[real[:, 0], real[:, 1]] = (
++                    l_th_flat[:n_real] - l_ref[real[:, 0], real[:, 1]]
++                )
++                mb_active = active & in_mb[None, :]
++                stats = dgpo_group_coefficients(
++                    delta, adv, mb_active, G, self.dgpo_beta, self.dgpo_traj_reduction
++                )
++                coef = torch.zeros(ids.shape[0])
++                coef[:n_real] = stats.coef[real[:, 0], real[:, 1]]
++
++                # 2. surrogate backward
++                self.optimizer.zero_grad()
++                norm = float(max(n_real, 1))
++                for m in range(n_micro):
++                    sl = slice(m * mbs, (m + 1) * mbs)
++                    fi_mb, x0_mb, eps_mb, t_mb = self._micro(fi, x0, eps, t, ids[sl])
++                    backward_ctx = self.before_micro_batch(
++                        self.model, is_last_micro_batch=(m + 1) == n_micro
++                    )
++                    v, target = self._velocity(self.model, fi_mb, x0_mb, eps_mb, t_mb)
++                    l_th = dsm_loss(v, target, chunk, dim)
++                    c = coef[sl].to(l_th.device)
++                    loss = (c * l_th).sum() / norm
++                    if v_ref is not None:
++                        vr = v_ref[ids[sl, 0], ids[sl, 1]].to(v.device)
++                        kl = (
++                            (v[:, :chunk, :dim].float() - vr)
++                            .square()
++                            .flatten(1)
++                            .mean(1)
++                        )
++                        real_mask = (torch.arange(m * mbs, (m + 1) * mbs) < n_real).to(
++                            kl.device
++                        )
++                        loss = loss + self.dgpo_kl_beta * (kl * real_mask).sum() / norm
++                    loss = loss * self.dgpo_loss_scale
++                    with backward_ctx:
++                        self.grad_scaler.scale(loss).backward()
++                    del fi_mb, loss, v
++                self.torch_platform.empty_cache()
++                grad_norm, lr_list = self.optimizer_step()
++
++                # metrics. all_reduce_dict packs values by sorted key, so every
++                # rank must emit the same keys even when it had nothing active.
++                with torch.no_grad():
++                    # Sums and counts, not per-rank means: a rank with no active
++                    # group would otherwise pull every average toward 0. The
++                    # ratio of the reduced values is the exact pooled mean.
++                    g_active = mb_active.view(T, -1, G).any(dim=(0, 2))
++                    pos = mb_active & (adv > 0)[None, :]
++                    neg = mb_active & (adv < 0)[None, :]
++                    zg = stats.z[g_active]
++                    append_to_dict(
++                        metrics,
++                        {
++                            "actor/grad_norm": grad_norm,
++                            "actor/lr": lr_list[0],
++                            "dgpo/active_chunks": float(n_real),
++                            "dgpo/active_group_frac": g_active.float().mean().item()
++                            * n_mb,
++                            "_n/chunk": float(n_real),
++                            "_n/pos": pos.sum().item(),
++                            "_n/neg": neg.sum().item(),
++                            "_n/group": float(zg.numel()),
++                            "_s/l_theta": l_th_flat[:n_real].sum().item(),
++                            "_s/l_ref": l_ref[mb_active].sum().item(),
++                            "_s/delta_pos": delta[pos].sum().item(),
++                            "_s/delta_neg": delta[neg].sum().item(),
++                            "_s/z": zg.sum().item(),
++                            "_s/gate": stats.gate[g_active].sum().item(),
++                            "_s/pref_acc": (zg > 0).float().sum().item(),
++                        },
++                    )
++
++        self.lr_scheduler.step()
++        self.soft_update_rollout_model()
++        self._update_ref_ema()
++        self.optimizer.zero_grad()
++        clear_memory()
++        mean_metric_dict = {key: np.mean(value) for key, value in metrics.items()}
++        mean_metric_dict = all_reduce_dict(
++            mean_metric_dict, op=torch.distributed.ReduceOp.AVG
++        )
++        return self._pool_metrics(mean_metric_dict)
++
++    @staticmethod
++    def _pool_metrics(m: dict) -> dict:
++        """Turn reduced (sum, count) pairs into pooled means; drop the helpers."""
++        denom = {
++            "l_theta": "chunk",
++            "l_ref": "chunk",
++            "delta_pos": "pos",
++            "delta_neg": "neg",
++            "z": "group",
++            "gate": "group",
++            "pref_acc": "group",
++        }
++        out = {k: v for k, v in m.items() if not k.startswith(("_s/", "_n/"))}
++        for name, count in denom.items():
++            if f"_s/{name}" in m:
++                n = m[f"_n/{count}"]
++                out[f"dgpo/{name}"] = m[f"_s/{name}"] / n if n > 0 else 0.0
++        return out
+diff --git a/tests/unit_tests/test_dgpo.py b/tests/unit_tests/test_dgpo.py
+new file mode 100644
+index 00000000..476e96de
+--- /dev/null
++++ b/tests/unit_tests/test_dgpo.py
+@@ -0,0 +1,280 @@
++# Copyright 2026 The RLinf Authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     https://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""DGPO math: the micro-batch surrogate must carry the group objective's gradient."""
++
++import pytest
++import torch
++
++from rlinf.algorithms.dgpo import dgpo_exact_loss, dgpo_group_coefficients, dsm_loss
++from rlinf.workers.actor.fsdp_dgpo_policy_worker import _gather_chunks
++
++
++def _grpo_adv(rewards, G):
++    r = rewards.view(-1, G)
++    return ((r - r.mean(1, keepdim=True)) / (r.std(1, keepdim=True) + 1e-6)).view(-1)
++
++
++def _setup(T=12, G=4, n_groups=3, seed=0):
++    g = torch.Generator().manual_seed(seed)
++    B = G * n_groups
++    lengths = torch.randint(3, T + 1, (B,), generator=g)
++    valid = torch.arange(T)[:, None] < lengths[None, :]
++    rewards = (torch.rand(B, generator=g) > 0.5).float()
++    rewards[:G] = torch.tensor([1.0, 0, 0, 0])[:G]  # at least one mixed group
++    adv = _grpo_adv(rewards.double(), G)  # float32 leaves sum(A) ~ 1e-7 off zero
++    l_ref = torch.rand(T, B, generator=g, dtype=torch.float64)
++    l_theta = l_ref + 0.1 * torch.randn(T, B, generator=g, dtype=torch.float64)
++    return l_theta, l_ref, adv, valid, G
++
++
++@pytest.mark.parametrize("reduction", ["sum", "mean"])
++@pytest.mark.parametrize("beta", [1.0, 100.0])
++def test_surrogate_gradient_matches_exact(reduction, beta):
++    l_theta, l_ref, adv, valid, G = _setup()
++    T, B = l_theta.shape
++    x = l_theta.clone().requires_grad_(True)
++    n_groups = B // G
++    exact = dgpo_exact_loss(x, l_ref, adv, valid, G, beta, reduction)
++    (g_exact,) = torch.autograd.grad(exact, x)
++
++    stats = dgpo_group_coefficients((l_theta - l_ref), adv, valid, G, beta, reduction)
++    y = l_theta.clone().requires_grad_(True)
++    (stats.coef * y).sum().backward()
++    # surrogate drops the constant beta / (G * T) and the 1/n_groups of the mean
++    scale = beta / (G * T) / n_groups
++    torch.testing.assert_close(y.grad * scale, g_exact)
++
++
++def test_partition_function_cancels():
++    """Adding beta*log Z(c) to every trajectory of a group must not move z_g."""
++    l_theta, l_ref, adv, valid, G = _setup()
++    T, B = l_theta.shape
++    base = dgpo_group_coefficients(l_theta - l_ref, adv, valid, G, 10.0)
++    # a per-group shift of every trajectory's implicit reward ell_i by c_g:
++    # under "sum" ell_i = sum_k delta_ik / T, so put T*c_g on one valid chunk
++    shift = torch.zeros(T, B, dtype=l_theta.dtype)
++    c = torch.randn(B // G, dtype=l_theta.dtype).repeat_interleave(G)
++    shift[0] = T * c
++    shifted = dgpo_group_coefficients(l_theta - l_ref + shift, adv, valid, G, 10.0)
++    torch.testing.assert_close(shifted.z, base.z)
++
++
++def test_zero_start_gate_is_half_and_matches_weighted_regression():
++    """At theta == ref every gate is 0.5: DGPO starts as advantage-weighted DSM."""
++    _, l_ref, adv, valid, G = _setup()
++    stats = dgpo_group_coefficients(torch.zeros_like(l_ref), adv, valid, G, 100.0)
++    torch.testing.assert_close(stats.gate, torch.full_like(stats.gate, 0.5))
++    expected = 0.5 * adv[None, :] * valid  # r*T == 1 under "sum"
++    torch.testing.assert_close(stats.coef, expected.to(stats.coef.dtype))
++
++
++def test_invalid_and_filtered_chunks_get_no_gradient():
++    l_theta, l_ref, adv, valid, G = _setup()
++    adv[G : 2 * G] = 0.0  # a filtered (all-same-reward) group
++    stats = dgpo_group_coefficients(l_theta - l_ref, adv, valid, G, 100.0)
++    assert (stats.coef[~valid] == 0).all()
++    assert (stats.coef[:, G : 2 * G] == 0).all()
++
++
++def test_preferring_positives_saturates_gate():
++    """If theta already fits positives better and negatives worse, z > 0 and gate -> 0."""
++    _, l_ref, adv, valid, G = _setup()
++    delta = -adv[None, :].expand_as(l_ref).clone() * valid  # L_theta < L_ref iff A > 0
++    stats = dgpo_group_coefficients(delta, adv, valid, G, 1e3)
++    mixed = adv.view(-1, G).abs().sum(1) > 0
++    assert (stats.z[mixed] > 0).all()
++    assert (stats.gate[mixed] < 1e-3).all()
++
++
++def test_dsm_loss_slices_executed_part():
++    v = torch.zeros(2, 5, 32)
++    tgt = torch.zeros(2, 5, 32)
++    tgt[:, :, 7:] = 100.0  # padded dims must not count
++    tgt[0, :, :7] = 1.0
++    out = dsm_loss(v, tgt, action_chunk=5, action_dim=7)
++    torch.testing.assert_close(out, torch.tensor([1.0, 0.0]))
++
++
++def test_gather_chunks_nested():
++    fi = {
++        "a": torch.arange(24).view(4, 6),
++        "sub": {"b": torch.arange(48).view(4, 6, 2)},
++    }
++    t_idx = torch.tensor([0, 3, 2])
++    b_idx = torch.tensor([5, 0, 1])
++    out = _gather_chunks(fi, t_idx, b_idx)
++    assert out["a"].tolist() == [5, 18, 13]
++    assert out["sub"]["b"][:, 0].tolist() == [10, 36, 26]
++
++
++def test_pooled_metrics_ignore_inactive_ranks():
++    """Rank A: one group with gate 0.5; rank B: nothing active. Pooled gate is 0.5."""
++    from rlinf.workers.actor.fsdp_dgpo_policy_worker import EmbodiedDGPOFSDPPolicy
++
++    rank_a = {"_s/gate": 0.5, "_n/group": 1.0, "_n/chunk": 4.0, "_s/l_theta": 2.0}
++    rank_b = {"_s/gate": 0.0, "_n/group": 0.0, "_n/chunk": 0.0, "_s/l_theta": 0.0}
++    avg = {k: (rank_a[k] + rank_b[k]) / 2 for k in rank_a}  # what all_reduce AVG gives
++    out = EmbodiedDGPOFSDPPolicy._pool_metrics(avg)
++    assert out["dgpo/gate"] == pytest.approx(0.5)
++    assert out["dgpo/l_theta"] == pytest.approx(0.5)
++    assert not any(k.startswith(("_s/", "_n/")) for k in out)
++
++
++def test_mean_reduction_balances_gradient_mass():
++    """Run 54407201 collapsed under "sum": long failures outweigh short successes.
++
++    Under "mean" every trajectory's total coefficient is gate * A_i * T whatever
++    its length, so it sums to zero over a group, as it does per image in DGPO.
++    """
++    T, G = 48, 8
++    valid = torch.zeros(T, G, dtype=torch.bool)
++    valid[:20, :7] = True  # seven successes stop after 20 chunks
++    valid[:, 7] = True  # one failure runs the whole horizon
++    rewards = torch.tensor([1.0] * 7 + [0.0], dtype=torch.float64)
++    adv = _grpo_adv(rewards, G)
++    delta = torch.zeros(T, G, dtype=torch.float64)
++    mass = {
++        r: dgpo_group_coefficients(delta, adv, valid, G, 1e4, r).coef.sum().item()
++        for r in ("sum", "mean")
++    }
++    assert mass["sum"] < -30  # net ascent on the DSM loss: the collapse
++    assert mass["mean"] == pytest.approx(0.0, abs=1e-9)
++
++
++def test_ref_ema_moves_reference_toward_policy():
++    """dgpo_ref_ema_tau: ref <- ref + tau * (theta - ref); None leaves it frozen."""
++    from types import SimpleNamespace
++
++    from rlinf.workers.actor.fsdp_dgpo_policy_worker import EmbodiedDGPOFSDPPolicy
++
++    ref = torch.nn.Linear(3, 2)
++    torch.nn.init.zeros_(ref.weight)
++    theta = {"weight": torch.ones(2, 3), "bias": torch.full((2,), 4.0)}
++    worker = SimpleNamespace(
++        dgpo_ref_ema_tau=0.25,
++        _get_ref_model=lambda: ref,
++        get_model_state_dict=lambda cpu_offload, full_state_dict: theta,
++    )
++    bias0 = ref.bias.detach().clone()
++    EmbodiedDGPOFSDPPolicy._update_ref_ema(worker)
++    torch.testing.assert_close(ref.weight, torch.full((2, 3), 0.25))
++    torch.testing.assert_close(ref.bias, bias0 + 0.25 * (4.0 - bias0))
++
++    worker.dgpo_ref_ema_tau = None
++    before = ref.weight.detach().clone()
++    EmbodiedDGPOFSDPPolicy._update_ref_ema(worker)
++    torch.testing.assert_close(ref.weight, before)
++
++
++def test_prism_rloo_zero_sum_and_band_separation():
++    from rlinf.algorithms.dgpo import prism_rloo_advantages
++
++    success = torch.tensor([1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1.0])
++    quality = torch.rand(16, generator=torch.Generator().manual_seed(0))
++    adv = prism_rloo_advantages(success, quality, 8, lam=0.5)
++    torch.testing.assert_close(adv.view(2, 8).sum(1), torch.zeros(2))
++    # every success outranks every failure in a mixed group
++    assert adv[:4].min() > adv[4:8].max()
++    # an all-success group still has signal, at the scale of lam * delta_q
++    assert adv[8:].abs().max() > 0
++    assert adv[8:].abs().max() <= 0.5 * 8 / 7 + 1e-6
++
++
++def test_trajectory_jerk_masks_and_measures_curvature():
++    from rlinf.algorithms.dgpo import trajectory_jerk
++
++    T, B, c, d = 4, 2, 5, 7
++    t = torch.arange(T * c, dtype=torch.float32)
++    smooth = t[:, None].expand(-1, d) * 0.1  # linear in time -> zero jerk
++    wiggly = smooth.clone()
++    wiggly[::2, :6] += 1.0  # alternating offset -> large jerk
++    acts = torch.stack([smooth, wiggly], dim=1).view(T, c, B, d)
++    acts = acts.permute(0, 2, 1, 3).reshape(T, B, c * d)
++    valid = torch.ones(T, B, dtype=torch.bool)
++    j = trajectory_jerk(acts, valid, c)
++    assert j[0].item() == pytest.approx(0.0, abs=1e-6)
++    assert j[1].item() > 1.0
++    # garbage after the episode ends must not count
++    acts2 = acts.clone()
++    acts2[2:, 0] = 1e3
++    valid2 = valid.clone()
++    valid2[2:, 0] = False
++    assert trajectory_jerk(acts2, valid2, c)[0].item() == pytest.approx(0.0, abs=1e-6)
++
++
++def _load_official_dgpo_loss():
++    """compute_group_dgpo_loss_allreduce, read verbatim from the official repo.
++
++    Luo-Yihong/DGPO ships no license file, so its source is not copied here; the
++    test executes it from a local clone (DGPO_OFFICIAL_SRC) and skips without one.
++    torch.distributed is replaced by a single-process stand-in.
++    """
++    import ast
++    import os
++    import types
++
++    # e.g. DGPO_OFFICIAL_SRC=/path/to/DGPO/scripts/train_sd3_dgpo.py
++    path = os.environ.get("DGPO_OFFICIAL_SRC", "")
++    if not path or not os.path.exists(path):
++        pytest.skip(f"official DGPO source not found at {path}")
++    src = open(path).read()
++    fn = next(
++        n
++        for n in ast.parse(src).body
++        if isinstance(n, ast.FunctionDef)
++        and n.name == "compute_group_dgpo_loss_allreduce"
++    )
++    fake_dist = types.SimpleNamespace(
++        all_reduce=lambda t, op=None: t, ReduceOp=types.SimpleNamespace(SUM=None)
++    )
++    ns = {"torch": torch, "dist": fake_dist}
++    exec(compile(ast.Module([fn], []), path, "exec"), ns)
++    return ns["compute_group_dgpo_loss_allreduce"]
++
++
++@pytest.mark.parametrize("beta", [1.0, 100.0, 1e4])
++def test_matches_official_dgpo_gradient(beta):
++    """With one chunk per trajectory, our gradient is the official DGPO gradient.
++
++    The official loss is mean_i(w_g * A_i * L_theta_i) with w_g =
++    sigmoid(beta/G * sum_g A * (L_theta - L_ref)); our surrogate is
++    sum_i coef_i * L_theta_i. They must agree up to the 1/B of the mean.
++    """
++    official = _load_official_dgpo_loss()
++    g = torch.Generator().manual_seed(1)
++    G, n_groups, D = 8, 3, 35
++    B = G * n_groups
++    target = torch.randn(B, D, generator=g, dtype=torch.float64)
++    ref_v = target + 0.3 * torch.randn(B, D, generator=g, dtype=torch.float64)
++    rewards = (torch.rand(B, generator=g) > 0.5).double()
++    rewards[:G] = torch.tensor([1.0, 0, 0, 0, 1, 0, 0, 0])
++    adv = _grpo_adv(rewards, G)
++    info = {"local_group_indices": torch.arange(B) // G, "num_groups": n_groups}
++
++    v_off = ref_v + 0.05 * torch.randn(B, D, generator=g, dtype=torch.float64)
++    v_off.requires_grad_(True)
++    loss = official(v_off, ref_v, target, adv, info, None, beta, group_size=G)
++    (grad_off,) = torch.autograd.grad(loss, v_off)
++
++    v_ours = v_off.detach().clone().requires_grad_(True)
++    l_th = dsm_loss(v_ours[:, None, :], target[:, None, :], 1, D)
++    l_ref = dsm_loss(ref_v[:, None, :], target[:, None, :], 1, D)
++    valid = torch.ones(1, B, dtype=torch.bool)
++    stats = dgpo_group_coefficients(
++        (l_th - l_ref).detach()[None, :].double(), adv, valid, G, beta, "sum"
++    )
++    (stats.coef[0] * l_th).sum().backward()
++    # our dsm_loss computes in float32, the official one in the input dtype
++    torch.testing.assert_close(v_ours.grad / B, grad_off, rtol=1e-4, atol=1e-9)
